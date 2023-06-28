@@ -1,0 +1,154 @@
+# Define genes, sampling times (read depth), fixed sampling probability, and batches.
+# Assume that each gene length is the same.
+set.seed(123)
+n_high <- 1000
+n_low <- 250
+genes <- paste('Gene',0:99,sep = '.')
+prob <- rep(1/length(genes), length(genes))
+high_depth <- list()
+low_depth <- list()
+
+# Create three replicates for each batch.
+for (i in 1:3) {
+  high_depth[[i]] <- sample(genes, size = n_high, replace = TRUE, prob = prob)
+  low_depth[[i]] <- sample(genes, size = n_low, replace = TRUE, prob = prob)
+}
+
+high_counts <- lapply(high_depth, table)
+low_counts <- lapply(low_depth, table)
+
+# Set genes that were not being sampled in the low-depth group to zero.
+low_counts <- lapply(low_counts, function(x) {
+  missing_genes <- setdiff(genes, names(x))
+  if (length(missing_genes) > 0) {
+    x[missing_genes] <- 0
+  }
+  return(x)
+})
+
+# Normalize by dividing by 1,000 and 250 respectively, adding 0.001, and taking the logarithm thereof.
+high_norm <- lapply(high_counts, function(x) log2((x / n_high) + 0.001))
+low_norm <- lapply(low_counts, function(x) log2((x / n_low) + 0.001))
+
+# Create a data frame combining the two batches.
+norm_df <- data.frame(
+  Batch_highdepth_1 = as.vector(high_norm[[1]]),
+  Batch_highdepth_2 = as.vector(high_norm[[2]]),
+  Batch_highdepth_3 = as.vector(high_norm[[3]]),
+  Batch_lowdepth_1 = as.vector(low_norm[[1]]),
+  Batch_lowdepth_2 = as.vector(low_norm[[2]]),
+  Batch_lowdepth_3 = as.vector(low_norm[[3]]))
+rownames(norm_df) <- names(high_norm[[1]])
+
+
+# Quantile normalization.
+library(preprocessCore)
+norm_df_2=as.matrix(norm_df)
+norm_df_2 <- normalize.quantiles(norm_df_2)
+rownames(norm_df_2)=rownames(norm_df)
+
+# Subtract the background gene expression.
+# We used the all sample average in each cohort as the normalization control.
+norm_df_2=t(scale(t(norm_df_2),center = T,scale = F))
+
+
+# Construct 500 arbitrary signatures, each containing 10 genes.
+set.seed(123)
+signatures <- lapply(1:500, function(x) sample(genes, size = 10))
+
+# Plot Figures A (use norm_df) and Figure B (use norm_df_2).
+# Figure A: Signature levels were calculated by simply taking the average of the normalized values.
+# Figure B: Signature levels were further subjected to quantile normalization and background gene normalization.
+library(tibble)
+library(ggplot2)
+library(ggpubr)
+num_signatures <- 500
+signature_size <- 10
+signature_combine <- data.frame(Signature = paste0("Signature.", 1:num_signatures),
+                                Batch_highdepth_1 = numeric(num_signatures),
+                                Batch_highdepth_2 = numeric(num_signatures),
+                                Batch_highdepth_3 = numeric(num_signatures),
+                                Batch_lowdepth_1 = numeric(num_signatures),
+                                Batch_lowdepth_2 = numeric(num_signatures),
+                                Batch_lowdepth_3 = numeric(num_signatures))
+
+for (i in 1:num_signatures) {
+  batch_start <- (i - 1) * signature_size + 1
+  batch_end <- i * signature_size
+  batch <- norm_df_2[unlist(signatures)[batch_start:batch_end], ]
+  signature_combine[i, "Batch_highdepth_1"] <- apply(batch, 2, mean)[1]
+  signature_combine[i, "Batch_highdepth_2"] <- apply(batch, 2, mean)[2]
+  signature_combine[i, "Batch_highdepth_3"] <- apply(batch, 2, mean)[3]
+  signature_combine[i, "Batch_lowdepth_1"] <- apply(batch, 2, mean)[4]
+  signature_combine[i, "Batch_lowdepth_2"] <- apply(batch, 2, mean)[5]
+  signature_combine[i, "Batch_lowdepth_3"] <- apply(batch, 2, mean)[6]
+}
+
+signature_combine <- column_to_rownames(signature_combine, "Signature")
+boxplot(signature_combine)
+
+
+
+
+# Plot Figure D (use norm_df) and Figure E  (use norm_df_2).
+# Figure D: Signature levels were calculated by simply taking the average of the normalized values.
+# Figure E: Signature levels were further subjected to quantile normalization and background gene normalization.
+library(ggplot2)
+num_signatures <- 500
+signature_size <- 10
+plot_data=norm_df[,c(1,4)] #select one column from each batch (e.g., 1 and 4; 2 and 5; 3 and 6).
+
+signature_combine <- data.frame(Signature = paste0("Signature.", 1:num_signatures),
+                                Batch_highdepth = numeric(num_signatures),
+                                Batch_lowdepth = numeric(num_signatures))
+
+for (i in 1:num_signatures) {
+  batch_start <- (i - 1) * signature_size + 1
+  batch_end <- i * signature_size
+  batch <- plot_data[unlist(signatures)[batch_start:batch_end], ]
+  signature_combine[i, "Batch_highdepth"] <- apply(batch, 2, mean)[1]
+  signature_combine[i, "Batch_lowdepth"] <- apply(batch, 2, mean)[2]
+}
+
+min=min(c(signature_combine$Batch_highdepth,signature_combine$Batch_lowdepth))
+max=max(c(signature_combine$Batch_highdepth,signature_combine$Batch_lowdepth))
+ggplot(signature_combine, aes(x = Batch_highdepth, y = Batch_lowdepth)) +
+  geom_point() +
+  labs(x = "Batch_highdepth", y = "Batch_lowdepth") +
+  ggtitle("Normalized values of two batches") +
+  lims(x = c(min, max), 
+       y = c(min, max))+   
+  geom_abline(slope = 1, intercept = 0, color = "red")
+
+
+# Calculate GSVA enrichment score and plot Figures C and F.
+library(tidyverse)
+library(msigdbr) 
+library(GSVA) 
+library(GSEABase)
+library(BiocParallel)
+
+expr= as.matrix(norm_df)
+gsva_mat <- gsva(expr=expr, 
+                 gset.idx.list=signatures, 
+                 method="gsva",
+                 kcdf="Gaussian" , #"Gaussian" for logTPM is recommended by the package itself.
+                 verbose=T,
+                 parallel.sz = parallel::detectCores())
+
+min=min(gsva_mat)
+max=max(gsva_mat)
+gsva_mat=as.data.frame(gsva_mat)
+
+# Figure C
+boxplot(gsva_mat)
+
+# Figure F
+plot_data=gsva_mat[,c(1,4)] #select one column from each batch (e.g., 1 and 4; 2 and 5; 3 and 6).
+ggplot(plot_data, aes(x = Batch_highdepth_1, y = Batch_lowdepth_1)) +
+  geom_point() +
+  labs(x = "Batch_highdepth", y = "Batch_lowdepth") +
+  ggtitle("Normalized values of two batches") +
+  lims(x = c(min, max),
+       y = c(min, max))+
+  geom_abline(slope = 1, intercept = 0, color = "red")
